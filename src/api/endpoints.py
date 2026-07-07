@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
+import json
 import uuid
 from typing import Optional
 
 from src.core.config import config
 from src.core.logging import logger
+from src.core.constants import ANTHROPIC_ERROR_TYPE_MAP
 from src.core.client import OpenAIClient
 from src.models.claude import ClaudeMessagesRequest, ClaudeTokenCountRequest
 from src.conversion.request_converter import convert_claude_to_openai
@@ -17,6 +19,18 @@ from src.core.model_manager import model_manager
 
 router = APIRouter()
 
+_tiktoken_enc = None
+try:
+    from src import _tiktoken_network_blocked
+    if _tiktoken_network_blocked:
+        import tiktoken
+        _tiktoken_enc = tiktoken.get_encoding(config.tokenizer_encoding)
+    else:
+        logger.critical("tiktoken network block failed — using heuristic token counting")
+except Exception as e:
+    exc_name = type(e).__name__
+    logger.warning(f"tiktoken encoder not available ({exc_name}): {e}")
+
 # Get custom headers from config
 custom_headers = config.get_custom_headers()
 
@@ -26,6 +40,8 @@ openai_client = OpenAIClient(
     config.request_timeout,
     api_version=config.azure_api_version,
     custom_headers=custom_headers,
+    max_retries=config.max_retries,
+    network_audit_log=config.network_audit_log,
 )
 
 async def validate_api_key(x_api_key: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
@@ -86,20 +102,18 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
                     headers={
                         "Cache-Control": "no-cache",
                         "Connection": "keep-alive",
-                        "Access-Control-Allow-Origin": "*",
-                        "Access-Control-Allow-Headers": "*",
                     },
                 )
             except HTTPException as e:
-                # Convert to proper error response for streaming
-                logger.error(f"Streaming error: {e.detail}")
+                logger.error(f"Streaming setup error: {e.detail}")
                 import traceback
 
                 logger.error(traceback.format_exc())
+                error_type = ANTHROPIC_ERROR_TYPE_MAP.get(e.status_code, "api_error")
                 error_message = openai_client.classify_openai_error(e.detail)
                 error_response = {
                     "type": "error",
-                    "error": {"type": "api_error", "message": error_message},
+                    "error": {"type": error_type, "message": error_message},
                 }
                 return JSONResponse(status_code=e.status_code, content=error_response)
         else:
@@ -122,113 +136,150 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
         raise HTTPException(status_code=500, detail=error_message)
 
 
+def _count_tokens_heuristic(request: ClaudeTokenCountRequest) -> int:
+    total_chars = 0
+    if request.system:
+        if isinstance(request.system, str):
+            total_chars += len(request.system)
+        elif isinstance(request.system, list):
+            for block in request.system:
+                if hasattr(block, "text"):
+                    total_chars += len(block.text)
+    for msg in request.messages:
+        if msg.content is None:
+            continue
+        elif isinstance(msg.content, str):
+            total_chars += len(msg.content)
+        elif isinstance(msg.content, list):
+            for block in msg.content:
+                if hasattr(block, "type") and block.type == "thinking":
+                    if hasattr(block, "thinking") and block.thinking:
+                        total_chars += len(block.thinking)
+                elif hasattr(block, "type") and block.type == "image":
+                    total_chars += 85 * 4
+                elif hasattr(block, "type") and block.type == "tool_use":
+                    total_chars += len(json.dumps(block.input, ensure_ascii=False))
+                elif hasattr(block, "type") and block.type == "tool_result":
+                    content = block.content if isinstance(block.content, str) else json.dumps(block.content, ensure_ascii=False)
+                    total_chars += len(content)
+                elif hasattr(block, "text") and block.text is not None:
+                    total_chars += len(block.text)
+    if request.tools:
+        for tool in request.tools:
+            total_chars += len(json.dumps(
+                {"name": tool.name, "description": tool.description or "", "parameters": tool.input_schema},
+                ensure_ascii=False,
+            ))
+    return max(1, total_chars // 4)
+
+
+def _count_tokens_tiktoken(request: ClaudeTokenCountRequest) -> int:
+    if _tiktoken_enc is None:
+        raise RuntimeError("tiktoken not cached")
+    enc = _tiktoken_enc
+    total = 0
+
+    if request.system:
+        if isinstance(request.system, str):
+            total += len(enc.encode(request.system))
+        elif isinstance(request.system, list):
+            for block in request.system:
+                if hasattr(block, "text"):
+                    total += len(enc.encode(block.text))
+        total += config.token_overhead_per_message
+
+    for msg in request.messages:
+        total += config.token_overhead_per_message
+        if msg.content is None:
+            continue
+        elif isinstance(msg.content, str):
+            total += len(enc.encode(msg.content))
+        elif isinstance(msg.content, list):
+            for block in msg.content:
+                if hasattr(block, "type") and block.type == "thinking":
+                    if hasattr(block, "thinking") and block.thinking:
+                        total += len(enc.encode(block.thinking))
+                elif hasattr(block, "type") and block.type == "image":
+                    total += 85
+                    logger.debug("Image block counted as fixed 85-token estimate")
+                elif hasattr(block, "type") and block.type == "tool_use":
+                    total += len(enc.encode(json.dumps(block.input, ensure_ascii=False)))
+                elif hasattr(block, "type") and block.type == "tool_result":
+                    content = block.content if isinstance(block.content, str) else json.dumps(block.content, ensure_ascii=False)
+                    total += len(enc.encode(content))
+                elif hasattr(block, "text") and block.text is not None:
+                    total += len(enc.encode(block.text))
+
+    if request.tools:
+        for tool in request.tools:
+            tool_str = json.dumps(
+                {"name": tool.name, "description": tool.description or "", "parameters": tool.input_schema},
+                ensure_ascii=False,
+            )
+            total += len(enc.encode(tool_str))
+            total += config.token_overhead_per_tool
+
+    total += config.token_overhead_priming
+    return max(1, total)
+
+
 @router.post("/v1/messages/count_tokens")
 async def count_tokens(request: ClaudeTokenCountRequest, _: None = Depends(validate_api_key)):
     try:
-        # For token counting, we'll use a simple estimation
-        # In a real implementation, you might want to use tiktoken or similar
-
-        total_chars = 0
-
-        # Count system message characters
-        if request.system:
-            if isinstance(request.system, str):
-                total_chars += len(request.system)
-            elif isinstance(request.system, list):
-                for block in request.system:
-                    if hasattr(block, "text"):
-                        total_chars += len(block.text)
-
-        # Count message characters
-        for msg in request.messages:
-            if msg.content is None:
-                continue
-            elif isinstance(msg.content, str):
-                total_chars += len(msg.content)
-            elif isinstance(msg.content, list):
-                for block in msg.content:
-                    if hasattr(block, "text") and block.text is not None:
-                        total_chars += len(block.text)
-
-        # Rough estimation: 4 characters per token
-        estimated_tokens = max(1, total_chars // 4)
+        try:
+            estimated_tokens = _count_tokens_tiktoken(request)
+        except Exception as e:
+            logger.warning(f"tiktoken unavailable, falling back to heuristic: {e}")
+            estimated_tokens = _count_tokens_heuristic(request)
 
         return {"input_tokens": estimated_tokens}
 
     except Exception as e:
         logger.error(f"Error counting tokens: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Token counting failed")
+
+
+@router.get("/v1/models")
+async def list_models(_: None = Depends(validate_api_key)):
+    models = []
+    seen = set()
+    for model_id in [config.big_model, config.middle_model, config.small_model]:
+        if model_id not in seen:
+            seen.add(model_id)
+            models.append({
+                "id": model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "proxy",
+            })
+    return {"object": "list", "data": models}
 
 
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
+    from src import _tiktoken_downloads_blocked
+    # Self-test at startup increments counter to 1. Anything above 1
+    # means tiktoken attempted a real download during operation.
+    runtime_blocked = max(0, _tiktoken_downloads_blocked - 1)
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "openai_api_configured": bool(config.openai_api_key),
-        "api_key_valid": config.validate_api_key(),
-        "client_api_key_validation": bool(config.anthropic_api_key),
+        "tiktoken_available": _tiktoken_enc is not None,
+        "tiktoken_downloads_blocked": runtime_blocked,
     }
 
 
-@router.get("/test-connection")
-async def test_connection():
-    """Test API connectivity to OpenAI"""
-    try:
-        # Simple test request to verify API connectivity
-        test_response = await openai_client.create_chat_completion(
-            {
-                "model": config.small_model,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "max_tokens": 5,
-            }
-        )
-
-        return {
-            "status": "success",
-            "message": "Successfully connected to OpenAI API",
-            "model_used": config.small_model,
-            "timestamp": datetime.now().isoformat(),
-            "response_id": test_response.get("id", "unknown"),
-        }
-
-    except Exception as e:
-        logger.error(f"API connectivity test failed: {e}")
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "failed",
-                "error_type": "API Error",
-                "message": str(e),
-                "timestamp": datetime.now().isoformat(),
-                "suggestions": [
-                    "Check your OPENAI_API_KEY is valid",
-                    "Verify your API key has the necessary permissions",
-                    "Check if you have reached rate limits",
-                ],
-            },
-        )
-
-
-@router.get("/")
+@router.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """Root endpoint"""
     return {
         "message": "Claude-to-OpenAI API Proxy v1.0.0",
         "status": "running",
-        "config": {
-            "openai_base_url": config.openai_base_url,
-            "max_tokens_limit": config.max_tokens_limit,
-            "api_key_configured": bool(config.openai_api_key),
-            "client_api_key_validation": bool(config.anthropic_api_key),
-            "big_model": config.big_model,
-            "small_model": config.small_model,
-        },
         "endpoints": {
             "messages": "/v1/messages",
             "count_tokens": "/v1/messages/count_tokens",
+            "models": "/v1/models",
             "health": "/health",
-            "test_connection": "/test-connection",
         },
     }

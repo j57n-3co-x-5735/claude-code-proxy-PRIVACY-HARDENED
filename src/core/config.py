@@ -15,16 +15,29 @@ class Config:
         
         self.openai_base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.azure_api_version = os.environ.get("AZURE_API_VERSION")  # For Azure OpenAI
-        self.host = os.environ.get("HOST", "0.0.0.0")
-        self.port = int(os.environ.get("PORT", "8082"))
+        self.host = os.environ.get("HOST", "127.0.0.1")
+        self.port = int(os.environ.get("PORT", "3000"))
         self.log_level = os.environ.get("LOG_LEVEL", "INFO")
         self.max_tokens_limit = int(os.environ.get("MAX_TOKENS_LIMIT", "4096"))
         self.min_tokens_limit = int(os.environ.get("MIN_TOKENS_LIMIT", "100"))
         
         # Connection settings
         self.request_timeout = int(os.environ.get("REQUEST_TIMEOUT", "90"))
-        self.max_retries = int(os.environ.get("MAX_RETRIES", "2"))
+        self.max_retries = int(os.environ.get("MAX_RETRIES", "10"))
         
+        # Network audit
+        self.network_audit_log = os.environ.get("NETWORK_AUDIT_LOG", "")
+
+        # Token counting (OpenAI-derived approximations, configurable for other models)
+        # TIKTOKEN_CACHE_DIR is set in src/__init__.py (persistent project-local cache)
+        self.tokenizer_encoding = os.environ.get("TOKENIZER_ENCODING", "cl100k_base")
+        self.token_overhead_per_message = int(os.environ.get("TOKEN_OVERHEAD_PER_MESSAGE", "4"))
+        self.token_overhead_per_tool = int(os.environ.get("TOKEN_OVERHEAD_PER_TOOL", "7"))
+        self.token_overhead_priming = int(os.environ.get("TOKEN_OVERHEAD_PRIMING", "3"))
+
+        # Model routing
+        self.model_prefix = os.environ.get("MODEL_PREFIX", "accounts/fireworks/models/")
+
         # Model settings - BIG and SMALL models
         self.big_model = os.environ.get("BIG_MODEL", "gpt-4o")
         self.middle_model = os.environ.get("MIDDLE_MODEL", self.big_model)
@@ -33,9 +46,6 @@ class Config:
     def validate_api_key(self):
         """Basic API key validation"""
         if not self.openai_api_key:
-            return False
-        # Basic format check for OpenAI API keys
-        if not self.openai_api_key.startswith('sk-'):
             return False
         return True
         

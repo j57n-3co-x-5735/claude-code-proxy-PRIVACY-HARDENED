@@ -1,0 +1,80 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Populate tiktoken cache
+        run: ./scripts/update-tokenizer.sh
+
+      - name: Run tests
+        run: uv run pytest tests/ --ignore=tests/test_main.py -v
+
+      - name: Verify tiktoken cache integrity
+        run: ./scripts/update-tokenizer.sh --verify-only
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t proxy-test .
+
+      - name: Start container
+        run: |
+          docker run -d --name proxy-test \
+            -p 3099:3000 \
+            -e OPENAI_API_KEY=test-key \
+            -e PORT=3000 \
+            -e HOST=0.0.0.0 \
+            proxy-test
+
+      - name: Wait for startup
+        run: |
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:3099/health && break
+            sleep 1
+          done
+
+      - name: Verify tiktoken available
+        run: |
+          curl -sf http://localhost:3099/health | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert data.get('tiktoken_available') is True, f'tiktoken not available: {data}'
+          print('tiktoken_available: true')
+          "
+
+      - name: Verify token counting
+        run: |
+          curl -sf -X POST http://localhost:3099/v1/messages/count_tokens \
+            -H "Content-Type: application/json" \
+            -d '{"model":"test","messages":[{"role":"user","content":"hello world"}]}' \
+          | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert data.get('input_tokens', 0) > 0, f'Token count is 0: {data}'
+          print(f'input_tokens: {data[\"input_tokens\"]}')
+          "
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f proxy-test 2>/dev/null || true
+          docker rmi proxy-test 2>/dev/null || true

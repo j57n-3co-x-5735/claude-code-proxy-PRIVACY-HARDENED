@@ -15,6 +15,11 @@ class ClaudeContentBlockToolUse(BaseModel):
     name: str
     input: Dict[str, Any]
 
+class ClaudeContentBlockThinking(BaseModel):
+    type: Literal["thinking"]
+    thinking: str = ""
+    signature: Optional[str] = None
+
 class ClaudeContentBlockToolResult(BaseModel):
     type: Literal["tool_result"]
     tool_use_id: str
@@ -25,8 +30,8 @@ class ClaudeSystemContent(BaseModel):
     text: str
 
 class ClaudeMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: Union[str, List[Union[ClaudeContentBlockText, ClaudeContentBlockImage, ClaudeContentBlockToolUse, ClaudeContentBlockToolResult]]]
+    role: str
+    content: Union[str, List[Union[ClaudeContentBlockText, ClaudeContentBlockImage, ClaudeContentBlockToolUse, ClaudeContentBlockToolResult, ClaudeContentBlockThinking]], None] = None
 
 class ClaudeTool(BaseModel):
     name: str
@@ -34,7 +39,8 @@ class ClaudeTool(BaseModel):
     input_schema: Dict[str, Any]
 
 class ClaudeThinkingConfig(BaseModel):
-    enabled: bool = True
+    type: Optional[str] = "enabled"
+    budget_tokens: Optional[int] = None
 
 class ClaudeMessagesRequest(BaseModel):
     model: str

@@ -173,5 +173,9 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
+# Proxy runtime
+.proxy.pid
+.proxy.lock
+.tiktoken-cache/
+
 # End of https://www.toptal.com/developers/gitignore/api/python
-n

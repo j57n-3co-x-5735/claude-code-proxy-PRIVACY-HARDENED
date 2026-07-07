@@ -1,6 +1,5 @@
 import json
 from typing import Dict, Any, List
-from venv import logger
 from src.core.constants import Constants
 from src.models.claude import ClaudeMessagesRequest, ClaudeMessage
 from src.core.config import config
@@ -93,6 +92,10 @@ def convert_claude_to_openai(
     if claude_request.top_p is not None:
         openai_request["top_p"] = claude_request.top_p
 
+    # Map metadata.user_id to OpenAI user parameter
+    if claude_request.metadata and claude_request.metadata.get("user_id"):
+        openai_request["user"] = claude_request.metadata["user_id"]
+
     # Convert tools
     if claude_request.tools:
         openai_tools = []
@@ -111,13 +114,20 @@ def convert_claude_to_openai(
         if openai_tools:
             openai_request["tools"] = openai_tools
 
+    # Pass thinking/reasoning config to Fireworks (natively supported)
+    if claude_request.thinking and claude_request.thinking.type == "enabled":
+        thinking_config = {"type": "enabled"}
+        if claude_request.thinking.budget_tokens:
+            thinking_config["budget_tokens"] = claude_request.thinking.budget_tokens
+        openai_request["thinking"] = thinking_config
+
     # Convert tool choice
     if claude_request.tool_choice:
         choice_type = claude_request.tool_choice.get("type")
         if choice_type == "auto":
             openai_request["tool_choice"] = "auto"
         elif choice_type == "any":
-            openai_request["tool_choice"] = "auto"
+            openai_request["tool_choice"] = "required"
         elif choice_type == "tool" and "name" in claude_request.tool_choice:
             openai_request["tool_choice"] = {
                 "type": Constants.TOOL_FUNCTION,

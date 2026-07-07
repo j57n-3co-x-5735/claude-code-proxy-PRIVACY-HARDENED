@@ -27,3 +27,12 @@ class Constants:
     
     DELTA_TEXT = "text_delta"
     DELTA_INPUT_JSON = "input_json_delta"
+
+
+ANTHROPIC_ERROR_TYPE_MAP = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    429: "rate_limit_error",
+}
