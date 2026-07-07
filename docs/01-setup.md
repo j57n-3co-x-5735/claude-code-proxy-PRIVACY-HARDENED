@@ -10,8 +10,8 @@ For a faster path, see [Quick Start](00-quickstart.md).
 ## Installation
 
 ```bash
-git clone https://github.com/j57n-3co-x-5735/claude-code-proxy
-cd claude-code-proxy
+git clone https://github.com/j57n-3co-x-5735/claude-code-proxy-PRIVACY-HARDENED
+cd claude-code-proxy-PRIVACY-HARDENED
 uv sync --locked
 ./scripts/update-tokenizer.sh
 ```

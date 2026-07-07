@@ -5,8 +5,8 @@ Get Claude Code running through the proxy in under 5 minutes.
 ## 1. Install
 
 ```bash
-git clone https://github.com/j57n-3co-x-5735/claude-code-proxy
-cd claude-code-proxy
+git clone https://github.com/j57n-3co-x-5735/claude-code-proxy-PRIVACY-HARDENED
+cd claude-code-proxy-PRIVACY-HARDENED
 uv sync --locked
 ./scripts/update-tokenizer.sh
 ```
